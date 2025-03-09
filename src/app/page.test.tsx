@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import Home from './page';
+import { MotionProps } from 'framer-motion';
 
 // Framer Motion コンポーネントをモック
 jest.mock('framer-motion', () => {
@@ -8,7 +9,7 @@ jest.mock('framer-motion', () => {
     __esModule: true,
     ...actual,
     motion: {
-      div: ({ children, className, ...props }: any) => (
+      div: ({ children, className }: React.HTMLAttributes<HTMLDivElement> & MotionProps) => (
         <div className={className} data-testid="motion-div">{children}</div>
       ),
     },
@@ -16,11 +17,12 @@ jest.mock('framer-motion', () => {
 });
 
 // Link コンポーネントをモック
-jest.mock('next/link', () => {
-  return ({ href, children }: { href: string; children: React.ReactNode }) => (
-    <a href={href} data-testid="next-link">{children}</a>
-  );
-});
+const NextLink = ({ href, children }: { href: string; children: React.ReactNode }) => (
+  <a href={href} data-testid="next-link">{children}</a>
+);
+NextLink.displayName = 'NextLink';
+
+jest.mock('next/link', () => NextLink);
 
 describe('Home page', () => {
   it('renders the title correctly', () => {

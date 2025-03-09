@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
@@ -15,128 +15,43 @@ interface TranscriptSegment {
   explanation?: string;
 }
 
+interface SpeechRecognitionEvent {
+  resultIndex: number;
+  results: {
+    [index: number]: {
+      isFinal: boolean;
+      [index: number]: {
+        transcript: string;
+      };
+    };
+  };
+}
+
+interface SpeechRecognitionErrorEvent {
+  error: string;
+}
+
+interface SpeechRecognition extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start: () => void;
+  stop: () => void;
+  onresult: (event: SpeechRecognitionEvent) => void;
+  onerror: (event: SpeechRecognitionErrorEvent) => void;
+}
+
 export default function PracticePage() {
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState<string>("");
   const [correctedSegments, setCorrectedSegments] = useState<TranscriptSegment[]>([]);
   const [processingCorrection, setProcessingCorrection] = useState(false);
   const [selectedLanguage, setSelectedLanguage] = useState("en-US");
-  const recognitionRef = useRef<any>(null);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Initialize speech recognition
-  useEffect(() => {
-    if (typeof window !== "undefined" && 'webkitSpeechRecognition' in window) {
-      // @ts-ignore - webkitSpeechRecognition is not in the types
-      const SpeechRecognition = window.webkitSpeechRecognition || window.SpeechRecognition;
-      recognitionRef.current = new SpeechRecognition();
-      recognitionRef.current.continuous = true;
-      recognitionRef.current.interimResults = true;
-      recognitionRef.current.lang = selectedLanguage;
-
-      recognitionRef.current.onresult = (event: any) => {
-        const current = event.resultIndex;
-        const result = event.results[current];
-        const transcriptText = result[0].transcript;
-        setTranscript(transcriptText);
-        
-        // Process with GPT for corrections when speech pauses
-        if (result.isFinal) {
-          processTextCorrection(transcriptText);
-        }
-      };
-
-      recognitionRef.current.onerror = (event: any) => {
-        console.error("Speech recognition error", event.error);
-        toast.error("音声認識エラー: " + event.error);
-        setIsListening(false);
-      };
-    } else {
-      toast.error("お使いのブラウザは音声認識をサポートしていません。");
-    }
-
-    return () => {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
-      }
-    };
-  }, [selectedLanguage]);
-
-  const toggleListening = () => {
-    if (isListening) {
-      recognitionRef.current?.stop();
-      setIsListening(false);
-    } else {
-      recognitionRef.current?.start();
-      setIsListening(true);
-      setTranscript("");
-      setCorrectedSegments([]);
-    }
-  };
-
-  const processTextCorrection = async (text: string) => {
-    if (!text.trim()) return;
-    
-    setProcessingCorrection(true);
-    
-    try {
-      // Call our correction API
-      const response = await fetch('/api/correct', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, language: selectedLanguage }),
-      });
-      
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
-      }
-      
-      const data = await response.json();
-      
-      // Validate API response format
-      if (Array.isArray(data) && data.length > 0) {
-        setCorrectedSegments(data);
-        
-        // Play the corrected text if there's a correction
-        const correctionItem = data.find(item => !item.isCorrect && item.correction);
-        if (correctionItem) {
-          playCorrectedAudio(correctionItem.correction);
-        }
-      } else {
-        console.error("Unexpected API response format:", data);
-        
-        // Handle invalid format by creating a generic feedback
-        const fallbackData = [{
-          text: text,
-          isCorrect: true,
-          explanation: "Unable to analyze text. Speech recognition was successful, but analysis failed."
-        }];
-        
-        setCorrectedSegments(fallbackData);
-        toast.error("分析結果の取得に失敗しました。もう一度お試しください。");
-      }
-    } catch (error) {
-      console.error("Error processing correction:", error);
-      toast.error("修正の処理中にエラーが発生しました。");
-      
-      // For development purposes when API isn't available
-      if (process.env.NODE_ENV === 'development') {
-        const mockCorrection = [
-          {
-            text: text,
-            isCorrect: false,
-            correction: text.includes('go') ? text.replace('go', 'went') : text + ' (corrected)',
-            explanation: "This is a mock correction for development."
-          }
-        ];
-        setCorrectedSegments(mockCorrection);
-      }
-    } finally {
-      setProcessingCorrection(false);
-    }
-  };
-
-  const playCorrectedAudio = async (text: string) => {
+  // Define helper functions first before they're used in hooks
+  const playCorrectedAudio = useCallback(async (text: string) => {
     try {
       // Call our text-to-speech API
       const response = await fetch('/api/speak', {
@@ -175,7 +90,122 @@ export default function PracticePage() {
         console.log("Development mode: Would play audio for text:", text);
       }
     }
+  }, [selectedLanguage]);
+
+  const processTextCorrection = useCallback(async (text: string) => {
+    if (!text.trim()) return;
+    
+    setProcessingCorrection(true);
+    
+    try {
+      // Call our correction API
+      const response = await fetch('/api/correct', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, language: selectedLanguage }),
+      });
+      
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      
+      // Validate API response format
+      if (Array.isArray(data) && data.length > 0) {
+        setCorrectedSegments(data);
+        
+        // Play the corrected text if there's a correction
+        const correctionItem = data.find(item => !item.isCorrect && item.correction);
+        if (correctionItem && correctionItem.correction) {
+          playCorrectedAudio(correctionItem.correction);
+        }
+      } else {
+        console.error("Unexpected API response format:", data);
+        
+        // Handle invalid format by creating a generic feedback
+        const fallbackData = [{
+          text: text,
+          isCorrect: true,
+          explanation: "Unable to analyze text. Speech recognition was successful, but analysis failed."
+        }];
+        
+        setCorrectedSegments(fallbackData);
+        toast.error("分析結果の取得に失敗しました。もう一度お試しください。");
+      }
+    } catch (error) {
+      console.error("Error processing correction:", error);
+      toast.error("修正の処理中にエラーが発生しました。");
+      
+      // For development purposes when API isn't available
+      if (process.env.NODE_ENV === 'development') {
+        const mockCorrection = [
+          {
+            text: text,
+            isCorrect: false,
+            correction: text.includes('go') ? text.replace('go', 'went') : text + ' (corrected)',
+            explanation: "This is a mock correction for development."
+          }
+        ];
+        setCorrectedSegments(mockCorrection);
+      }
+    } finally {
+      setProcessingCorrection(false);
+    }
+  }, [selectedLanguage, playCorrectedAudio]);
+
+  const toggleListening = () => {
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+    } else {
+      recognitionRef.current?.start();
+      setIsListening(true);
+      setTranscript("");
+      setCorrectedSegments([]);
+    }
   };
+
+  // Initialize speech recognition
+  useEffect(() => {
+    if (typeof window !== "undefined" && 'webkitSpeechRecognition' in window) {
+      // @ts-expect-error webkitSpeechRecognition is not in TypeScript's standard DOM types but is available in Chrome browsers
+      const SpeechRecognition = window.webkitSpeechRecognition || window.SpeechRecognition;
+      recognitionRef.current = new SpeechRecognition();
+      
+      if (recognitionRef.current) {
+        recognitionRef.current.continuous = true;
+        recognitionRef.current.interimResults = true;
+        recognitionRef.current.lang = selectedLanguage;
+
+        recognitionRef.current.onresult = (event: SpeechRecognitionEvent) => {
+          const current = event.resultIndex;
+          const result = event.results[current];
+          const transcriptText = result[0].transcript;
+          setTranscript(transcriptText);
+          
+          // Process with GPT for corrections when speech pauses
+          if (result.isFinal) {
+            processTextCorrection(transcriptText);
+          }
+        };
+
+        recognitionRef.current.onerror = (event: SpeechRecognitionErrorEvent) => {
+          console.error("Speech recognition error", event.error);
+          toast.error("音声認識エラー: " + event.error);
+          setIsListening(false);
+        };
+      }
+    } else {
+      toast.error("お使いのブラウザは音声認識をサポートしていません。");
+    }
+
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+    };
+  }, [selectedLanguage, processTextCorrection]);
 
   return (
     <div className="flex min-h-screen flex-col items-center bg-gradient-to-b from-blue-50 to-indigo-100 p-4">

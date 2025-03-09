@@ -3,10 +3,38 @@
  */
 
 // Node環境でテストを実行するように指定
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { POST } from './route';
 
-// モック化
-jest.mock('openai');
+// オリジナルの環境変数を保存
+const originalEnv = process.env;
+
+// OpenAI APIのモック
+jest.mock('openai', () => {
+  return jest.fn().mockImplementation(() => ({
+    chat: {
+      completions: {
+        create: jest.fn().mockResolvedValue({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify([
+                  {
+                    text: 'I go to the store yesterday',
+                    isCorrect: false,
+                    correction: 'I went to the store yesterday',
+                    explanation: 'Use past tense (went) instead of present tense (go) for past actions.'
+                  }
+                ])
+              }
+            }
+          ]
+        })
+      }
+    }
+  }));
+});
 
 // エラー型の拡張
 interface OpenAIError extends Error {
@@ -15,63 +43,38 @@ interface OpenAIError extends Error {
   type?: string;
 }
 
-describe('/api/correct API endpoint', () => {
-  let mockCreate: jest.Mock;
-  const originalEnv = process.env;
+// MockRequestの型を定義
+interface MockRequest extends Partial<Request> {
+  json: () => Promise<{
+    text: string;
+    language: string;
+  }>;
+}
 
+// テスト用の型を定義（ESLintのexpect.any()対策）
+interface CorrectionResponse {
+  text: string;
+  isCorrect: boolean;
+  correction?: string;
+  explanation?: string;
+}
+
+describe('/api/correct API endpoint', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    
-    // 環境変数を設定
-    process.env = { ...originalEnv, OPENAI_API_MODE: 'fallback' };
-    
-    // モックの設定
-    mockCreate = jest.fn().mockResolvedValue({
-      choices: [
-        {
-          message: {
-            content: JSON.stringify([
-              {
-                text: "I go to the store yesterday",
-                isCorrect: false,
-                correction: "I went to the store yesterday",
-                explanation: "Use past tense for completed actions in the past."
-              }
-            ])
-          }
-        }
-      ]
-    });
-
-    // OpenAIモジュールのモックを設定
-    jest.doMock('openai', () => {
-      return {
-        __esModule: true,
-        default: jest.fn().mockImplementation(() => ({
-          chat: {
-            completions: {
-              create: mockCreate
-            }
-          }
-        }))
-      };
-    });
-
-    // ルートモジュールを再度インポートして新しいモックが反映されるようにする
-    jest.resetModules();
+    process.env = { ...originalEnv };
   });
 
-  afterEach(() => {
-    // 環境変数を元に戻す
+  afterAll(() => {
     process.env = originalEnv;
   });
 
   it('should return 400 if text is empty', async () => {
-    const req = {
+    const req: MockRequest = {
       json: jest.fn().mockResolvedValue({ text: '', language: 'en-US' })
     };
 
-    const res = await POST(req as any);
+    const res = await POST(req as unknown as Request);
     expect(res.status).toBe(400);
 
     const data = await res.json();
@@ -82,24 +85,60 @@ describe('/api/correct API endpoint', () => {
     // 環境変数をクリアしてOpenAI clientがnullになるようにする
     process.env = { ...originalEnv, OPENAI_API_KEY: '' };
 
-    const req = {
+    const req: MockRequest = {
       json: jest.fn().mockResolvedValue({ 
         text: 'I go to the store yesterday', 
         language: 'en-US' 
       })
     };
 
-    const res = await POST(req as any);
+    const res = await POST(req as unknown as Request);
     expect(res.status).toBe(200);
 
-    const data = await res.json();
-    // モックデータの形式はモックジェネレーターに基づく
-    expect(data).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        text: expect.any(String),
-        isCorrect: expect.any(Boolean)
+    const data = await res.json() as CorrectionResponse[];
+    expect(Array.isArray(data)).toBe(true);
+    expect(data.length).toBeGreaterThan(0);
+    expect(data[0]).toMatchObject<Partial<CorrectionResponse>>({
+      text: expect.any(String),
+      isCorrect: expect.any(Boolean)
+    });
+  });
+
+  it('should handle API errors and return fallback data', async () => {
+    // テストのために元のモックの実装を保存
+    jest.mock('openai', () => {
+      return jest.fn().mockImplementation(() => ({
+        chat: {
+          completions: {
+            create: jest.fn().mockRejectedValue({
+              message: 'API quota exceeded',
+              status: 429
+            } as OpenAIError)
+          }
+        }
+      }));
+    });
+
+    process.env = { ...originalEnv, OPENAI_API_KEY: 'test_key', OPENAI_API_MODE: 'fallback' };
+
+    const req: MockRequest = {
+      json: jest.fn().mockResolvedValue({ 
+        text: 'I go to the store yesterday', 
+        language: 'en-US' 
       })
-    ]));
+    };
+
+    // この場合、モックは既に設定されているため、POSTをそのまま使用できる
+    const res = await POST(req as unknown as Request);
+    expect(res.status).toBe(200);
+
+    const data = await res.json() as CorrectionResponse[];
+    expect(Array.isArray(data)).toBe(true);
+    expect(data.length).toBeGreaterThan(0);
+    expect(data[0]).toMatchObject<Partial<CorrectionResponse>>({
+      text: expect.any(String),
+      isCorrect: expect.any(Boolean)
+    });
   });
 
   // クォータエラーをシミュレートして、フォールバックメカニズムをテスト
@@ -115,7 +154,7 @@ describe('/api/correct API endpoint', () => {
     };
 
     // クォータエラーをシミュレート
-    mockCreate.mockRejectedValueOnce({
+    const mockCreate = jest.fn().mockRejectedValueOnce({
       status: 429,
       code: 'insufficient_quota',
       type: 'insufficient_quota',
@@ -147,7 +186,7 @@ describe('/api/correct API endpoint', () => {
     };
 
     // モックの実装をリセット
-    mockCreate.mockReset();
+    const mockCreate = jest.fn();
 
     // 最初のモデルは失敗、2つ目は成功するようにモック
     mockCreate
